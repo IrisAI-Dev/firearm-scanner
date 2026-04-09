@@ -5,45 +5,39 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>IRIS Firearm Scanner</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;color:#fff;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;color:#fff;min-height:100vh;display:flex;flex-direction:column}
         .hdr{padding:10px 16px;background:#16213e;text-align:center;font-size:15px;font-weight:600;border-bottom:2px solid #0f3460;flex-shrink:0}
         .hdr em{color:#e94560;font-style:normal}
-        .cam{position:relative;flex:1;overflow:hidden;background:#000}
-        video{width:100%;height:100%;object-fit:cover}
-        .frame{position:absolute;top:8%;left:4%;right:4%;height:35%;border:2px solid #e94560;border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,.4);pointer-events:none}
-        .line{position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#e94560,transparent);animation:sc 2s ease-in-out infinite}
-        @keyframes sc{0%,100%{top:0}50%{top:100%}}
-        .hint{position:absolute;bottom:-28px;width:100%;text-align:center;font-size:13px;color:#aaa}
-        .pnl{background:#16213e;padding:12px;flex-shrink:0;max-height:55vh;overflow-y:auto}
-        #st{text-align:center;font-size:14px;color:#8899aa;padding:4px 0}
+        #scanner{flex:1;min-height:300px;background:#000}
+        #scanner video{border-radius:0!important}
+        .pnl{background:#16213e;padding:12px;flex-shrink:0;overflow-y:auto}
+        #st{text-align:center;font-size:14px;color:#8899aa;padding:6px 0}
         #st.ok{color:#4ecca3}#st.err{color:#e94560}
         .card{background:#0f1b36;border:1px solid #0f3460;border-radius:8px;padding:10px;margin-top:8px;font-size:13px}
-        .card .r{display:flex;padding:2px 0}
-        .card .l{color:#6b7fa0;min-width:85px;font-size:12px}
-        .card .v{color:#fff;font-weight:500}
+        .card .r{display:flex;padding:3px 0}
+        .card .l{color:#6b7fa0;min-width:85px;font-size:12px;flex-shrink:0}
+        .card .v{color:#fff;font-weight:500;word-break:break-word}
         .card .v.w{color:#e94560}
         .card .v.g{color:#4ecca3}
+        .sep{border-top:1px solid #0f3460;margin:6px 0}
         .btns{text-align:center;margin-top:10px}
-        .btn{display:inline-block;padding:10px 20px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;color:#fff;margin:0 4px}
+        .btn{display:inline-block;padding:11px 22px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;color:#fff;margin:4px}
         .bp{background:#e94560}.bs{background:#0f3460}
         .btn:active{opacity:.7}
         .hid{display:none!important}
-        .error-box{background:#2a1525;border:1px solid #e94560;border-radius:8px;padding:12px;margin-top:8px;font-size:13px;text-align:center}
+        /* Override html5-qrcode styles */
+        #scanner img[alt="Info"]{display:none!important}
+        #scanner__dashboard{display:none!important}
     </style>
 </head>
 <body>
 <div class="hdr"><em>IRIS</em> Firearm Licence Scanner</div>
-<div class="cam">
-    <video id="vid" autoplay playsinline muted></video>
-    <div class="frame">
-        <div class="line" id="ln"></div>
-        <div class="hint">Align barcode within frame</div>
-    </div>
-</div>
+<div id="scanner"></div>
 <div class="pnl">
-    <div id="st">Loading...</div>
+    <div id="st">Starting camera...</div>
     <div id="rs" class="hid"></div>
     <div id="bt" class="btns hid">
         <button class="btn bp" onclick="doSend()">Send to IRIS</button>
@@ -52,105 +46,130 @@
 </div>
 
 <script>
-(async function(){
-    const vid=document.getElementById('vid'), st=document.getElementById('st'),
-          rs=document.getElementById('rs'), bt=document.getElementById('bt'),
-          ln=document.getElementById('ln');
+(function(){
+    const st=document.getElementById('st'),
+          rs=document.getElementById('rs'),
+          bt=document.getElementById('bt');
     const tg=window.Telegram?.WebApp;
     if(tg){tg.ready();tg.expand()}
 
-    let scanning=false, rawText=null, detector=null;
+    let rawText=null, scanner=null;
 
-    // Field mapping
-    const F=['licence_type','id_number','station_code','full_name','section','issue_date',
+    // Field mapping for SA Firearm Licence barcode (20 pipe-delimited fields)
+    const FIELDS=['licence_type','id_number','station_code','full_name','section','issue_date',
         'expiry_date','serial_number','firearm_type','make','model','calibre','barrel_serial',
         'barrel_make','receiver_serial','receiver_make','frame_serial','frame_make','licence_number','cfr_record_id'];
-    const L={licence_type:'Type',id_number:'ID Number',station_code:'Station',full_name:'Name',
-        section:'Section',issue_date:'Issued',expiry_date:'Expires',serial_number:'Serial',
-        firearm_type:'Firearm',make:'Make',model:'Model',calibre:'Calibre',licence_number:'Licence #'};
 
-    function parse(t){ const p=t.split('|'),o={}; F.forEach((f,i)=>{o[f]=p[i]||''}); return o; }
-
-    // Check BarcodeDetector support
-    let hasNative=false;
-    if('BarcodeDetector' in window){
-        try{
-            const formats=await BarcodeDetector.getSupportedFormats();
-            if(formats.includes('pdf417')){
-                detector=new BarcodeDetector({formats:['pdf417']});
-                hasNative=true;
-            }
-        }catch(e){}
+    function parse(t){
+        const p=t.split('|'), o={};
+        FIELDS.forEach(function(f,i){ o[f]=p[i]||''; });
+        return o;
     }
 
-    if(!hasNative){
-        st.innerHTML='<div class="error-box">Your browser does not support PDF417 barcode scanning.<br><br>Use <b>Chrome on Android</b> for live scanning,<br>or send a photo directly to the bot.</div>';
-        st.className='err';
-        return;
-    }
-
-    // Start camera
-    try{
-        const stream=await navigator.mediaDevices.getUserMedia({
-            video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}
-        });
-        vid.srcObject=stream;
-        await vid.play();
-    }catch(e){
-        st.textContent='Camera error: '+e.message; st.className='err'; return;
-    }
-
-    // Scan loop
-    st.textContent='Scanning... hold card steady';
-    scanning=true;
-
-    async function scanFrame(){
-        if(!scanning) return;
-        try{
-            const results=await detector.detect(vid);
-            for(const bc of results){
-                const val=bc.rawValue||'';
-                if(val.includes('|') && val.split('|').length>=15){
-                    scanning=false;
-                    onFound(val);
-                    return;
-                }
-            }
-        }catch(e){}
-        requestAnimationFrame(scanFrame);
-    }
-    scanFrame();
-
-    function onFound(text){
+    function showResult(text){
         rawText=text;
-        const lic=parse(text);
+        var lic=parse(text);
         if(navigator.vibrate) navigator.vibrate([100,50,100]);
-        st.textContent='Licence decoded!'; st.className='ok';
-        ln.style.display='none';
 
-        let h='<div class="card">';
-        for(const[k,lb] of Object.entries(L)){
-            let v=lic[k]||'N/A', c='';
-            if(k==='expiry_date'&&v!=='N/A'){
+        st.textContent='Licence decoded!';
+        st.className='ok';
+
+        var rows=[
+            ['Type',lic.licence_type],
+            ['Licence #',lic.licence_number],
+            ['Section',lic.section],
+            ['ID Number',lic.id_number],
+            ['Name',lic.full_name],
+            ['Station',lic.station_code],
+            ['Issued',lic.issue_date],
+            ['Expires',lic.expiry_date],
+            ['---',''],
+            ['Serial',lic.serial_number],
+            ['Firearm',lic.firearm_type],
+            ['Make',lic.make],
+            ['Model',lic.model],
+            ['Calibre',lic.calibre]
+        ];
+
+        var h='<div class="card">';
+        rows.forEach(function(r){
+            if(r[0]==='---'){h+='<div class="sep"></div>';return}
+            var v=r[1]||'N/A', c='';
+            if(r[0]==='Expires'&&v!=='N/A'){
                 c=new Date(v)<new Date()?'w':'g';
                 if(c==='w') v+=' (EXPIRED)';
             }
-            h+=`<div class="r"><span class="l">${lb}:</span><span class="v ${c}">${v}</span></div>`;
-        }
+            h+='<div class="r"><span class="l">'+r[0]+':</span><span class="v '+c+'">'+v+'</span></div>';
+        });
         h+='</div>';
-        rs.innerHTML=h; rs.classList.remove('hid'); bt.classList.remove('hid');
+        rs.innerHTML=h;
+        rs.classList.remove('hid');
+        bt.classList.remove('hid');
+    }
+
+    function onScanSuccess(decodedText, decodedResult){
+        // Check if it's a firearm licence barcode (pipe-delimited, 15+ fields)
+        if(decodedText && decodedText.indexOf('|')!==-1 && decodedText.split('|').length>=15){
+            scanner.stop().then(function(){
+                showResult(decodedText);
+            }).catch(function(){
+                showResult(decodedText);
+            });
+        }
+    }
+
+    function startScanner(){
+        scanner=new Html5Qrcode("scanner");
+
+        var config={
+            fps:10,
+            qrbox:function(viewfinderWidth,viewfinderHeight){
+                return{
+                    width:Math.floor(viewfinderWidth*0.9),
+                    height:Math.floor(viewfinderHeight*0.4)
+                };
+            },
+            formatsToSupport:[Html5QrcodeSupportedFormats.PDF_417],
+            experimentalFeatures:{useBarCodeDetectorIfSupported:true}
+        };
+
+        scanner.start(
+            {facingMode:"environment"},
+            config,
+            onScanSuccess,
+            function(){}  // ignore scan failures (normal when no barcode in frame)
+        ).then(function(){
+            st.textContent='Scanning... point at barcode on back of card';
+        }).catch(function(err){
+            st.textContent='Camera error: '+err;
+            st.className='err';
+        });
     }
 
     window.doSend=function(){
         if(!rawText) return;
-        if(tg){tg.sendData(rawText);tg.close()}
-        else{navigator.clipboard?.writeText(rawText);st.textContent='Copied!'}
+        if(tg){
+            tg.sendData(rawText);
+            tg.close();
+        }else{
+            if(navigator.clipboard){
+                navigator.clipboard.writeText(rawText);
+                st.textContent='Copied to clipboard!';
+            }
+        }
     };
+
     window.doRescan=function(){
-        rawText=null; rs.classList.add('hid'); bt.classList.add('hid');
-        st.textContent='Scanning...'; st.className=''; ln.style.display='';
-        scanning=true; scanFrame();
+        rawText=null;
+        rs.classList.add('hid');
+        bt.classList.add('hid');
+        st.textContent='Scanning...';
+        st.className='';
+        startScanner();
     };
+
+    // Init
+    startScanner();
 })();
 </script>
 </body>
