@@ -11,8 +11,7 @@
         body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;color:#fff;min-height:100vh;display:flex;flex-direction:column}
         .hdr{padding:10px 16px;background:#16213e;text-align:center;font-size:15px;font-weight:600;border-bottom:2px solid #0f3460;flex-shrink:0}
         .hdr em{color:#e94560;font-style:normal}
-        #scanner{flex:1;min-height:300px;background:#000}
-        #scanner video{border-radius:0!important}
+        #scanner{flex:1;min-height:350px;background:#000;overflow:hidden}
         .pnl{background:#16213e;padding:12px;flex-shrink:0;overflow-y:auto}
         #st{text-align:center;font-size:14px;color:#8899aa;padding:6px 0}
         #st.ok{color:#4ecca3}#st.err{color:#e94560}
@@ -28,9 +27,9 @@
         .bp{background:#e94560}.bs{background:#0f3460}
         .btn:active{opacity:.7}
         .hid{display:none!important}
-        /* Override html5-qrcode styles */
-        #scanner img[alt="Info"]{display:none!important}
-        #scanner__dashboard{display:none!important}
+        /* Make the scan region a wide rectangle for barcode shape */
+        #scanner video{object-fit:cover!important}
+        #qr-shaded-region{border-radius:8px!important}
     </style>
 </head>
 <body>
@@ -47,22 +46,21 @@
 
 <script>
 (function(){
-    const st=document.getElementById('st'),
-          rs=document.getElementById('rs'),
-          bt=document.getElementById('bt');
-    const tg=window.Telegram?.WebApp;
+    var st=document.getElementById('st'),
+        rs=document.getElementById('rs'),
+        bt=document.getElementById('bt');
+    var tg=window.Telegram&&window.Telegram.WebApp;
     if(tg){tg.ready();tg.expand()}
 
-    let rawText=null, scanner=null;
+    var rawText=null, scanner=null;
 
-    // Field mapping for SA Firearm Licence barcode (20 pipe-delimited fields)
-    const FIELDS=['licence_type','id_number','station_code','full_name','section','issue_date',
+    var FIELDS=['licence_type','id_number','station_code','full_name','section','issue_date',
         'expiry_date','serial_number','firearm_type','make','model','calibre','barrel_serial',
         'barrel_make','receiver_serial','receiver_make','frame_serial','frame_make','licence_number','cfr_record_id'];
 
     function parse(t){
-        const p=t.split('|'), o={};
-        FIELDS.forEach(function(f,i){ o[f]=p[i]||''; });
+        var p=t.split('|'), o={};
+        for(var i=0;i<FIELDS.length;i++){o[FIELDS[i]]=p[i]||''}
         return o;
     }
 
@@ -70,7 +68,6 @@
         rawText=text;
         var lic=parse(text);
         if(navigator.vibrate) navigator.vibrate([100,50,100]);
-
         st.textContent='Licence decoded!';
         st.className='ok';
 
@@ -92,23 +89,22 @@
         ];
 
         var h='<div class="card">';
-        rows.forEach(function(r){
-            if(r[0]==='---'){h+='<div class="sep"></div>';return}
-            var v=r[1]||'N/A', c='';
-            if(r[0]==='Expires'&&v!=='N/A'){
+        for(var i=0;i<rows.length;i++){
+            if(rows[i][0]==='---'){h+='<div class="sep"></div>';continue}
+            var v=rows[i][1]||'N/A', c='';
+            if(rows[i][0]==='Expires'&&v!=='N/A'){
                 c=new Date(v)<new Date()?'w':'g';
                 if(c==='w') v+=' (EXPIRED)';
             }
-            h+='<div class="r"><span class="l">'+r[0]+':</span><span class="v '+c+'">'+v+'</span></div>';
-        });
+            h+='<div class="r"><span class="l">'+rows[i][0]+':</span><span class="v '+c+'">'+v+'</span></div>';
+        }
         h+='</div>';
         rs.innerHTML=h;
         rs.classList.remove('hid');
         bt.classList.remove('hid');
     }
 
-    function onScanSuccess(decodedText, decodedResult){
-        // Check if it's a firearm licence barcode (pipe-delimited, 15+ fields)
+    function onScanSuccess(decodedText){
         if(decodedText && decodedText.indexOf('|')!==-1 && decodedText.split('|').length>=15){
             scanner.stop().then(function(){
                 showResult(decodedText);
@@ -121,25 +117,35 @@
     function startScanner(){
         scanner=new Html5Qrcode("scanner");
 
+        // Wide rectangle scan box matching barcode/card shape
         var config={
-            fps:10,
-            qrbox:function(viewfinderWidth,viewfinderHeight){
-                return{
-                    width:Math.floor(viewfinderWidth*0.9),
-                    height:Math.floor(viewfinderHeight*0.4)
-                };
+            fps:15,
+            qrbox:function(vw,vh){
+                // Wide rectangle: 90% width, 25% height — matches PDF417 barcode shape
+                var w=Math.floor(vw*0.92);
+                var h=Math.floor(vh*0.22);
+                // Minimum sizes
+                if(w<250) w=250;
+                if(h<80) h=80;
+                return {width:w, height:h};
             },
+            aspectRatio:1.777778,
             formatsToSupport:[Html5QrcodeSupportedFormats.PDF_417],
-            experimentalFeatures:{useBarCodeDetectorIfSupported:true}
+            experimentalFeatures:{useBarCodeDetectorIfSupported:true},
+            videoConstraints:{
+                facingMode:"environment",
+                width:{ideal:1920},
+                height:{ideal:1080}
+            }
         };
 
         scanner.start(
             {facingMode:"environment"},
             config,
             onScanSuccess,
-            function(){}  // ignore scan failures (normal when no barcode in frame)
+            function(){}
         ).then(function(){
-            st.textContent='Scanning... point at barcode on back of card';
+            st.textContent='Point camera at the barcode on back of card';
         }).catch(function(err){
             st.textContent='Camera error: '+err;
             st.className='err';
@@ -148,14 +154,10 @@
 
     window.doSend=function(){
         if(!rawText) return;
-        if(tg){
-            tg.sendData(rawText);
-            tg.close();
-        }else{
-            if(navigator.clipboard){
-                navigator.clipboard.writeText(rawText);
-                st.textContent='Copied to clipboard!';
-            }
+        if(tg){tg.sendData(rawText);tg.close()}
+        else if(navigator.clipboard){
+            navigator.clipboard.writeText(rawText);
+            st.textContent='Copied to clipboard!';
         }
     };
 
@@ -168,7 +170,6 @@
         startScanner();
     };
 
-    // Init
     startScanner();
 })();
 </script>
